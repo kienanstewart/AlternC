@@ -11,15 +11,16 @@ $locales=array("fr" => "fr_FR.UTF-8",
 
 $uri=trim($_SERVER["REQUEST_URI"],"/");
 
-// auto lang redirect:
-if (!$uri) {
-  $lang="en";
-  if (isset($_SERVER["HTTP_ACCEPT_LANGUAGE"])) {
+$lang="en";
+if (isset($_SERVER["HTTP_ACCEPT_LANGUAGE"])) {
     $l=substr($_SERVER["HTTP_ACCEPT_LANGUAGE"],0,2);
     if (isset($otherlang[$l])) {
-      $lang=$l;
+        $lang=$l;
     }
-  }
+}
+
+// auto lang redirect:
+if (!$uri) {
   header("Location: /Home-".$lang."");
   exit();
 }
@@ -27,6 +28,9 @@ if (!$uri) {
 if (preg_match('#^(.*)-([^-]*)$#',$uri,$mat)) {
   $lang=$mat[2]; 
   $uri=$mat[1];
+} else {
+    header("Location: /".$uri."-".$lang);
+    exit();
 }
 
 if (!isset($otherlang[$lang])) {
@@ -47,9 +51,13 @@ unset($otherlang[$lang]);
 header("Content-Type: text/html; charset=UTF-8");
 
 if (!file_exists("../pages/".$uri."-".$lang.".md")) {
-  header("HTTP/1.0 404 Not Found");
-  echo "<h1>File not found</h1>";
-  exit();
+    if (file_exists("../pages/".ucfirst($uri)."-".$lang.".md")) {
+        header("Location: /".ucfirst($uri)."-".$lang);
+        exit();
+    }
+    header("HTTP/1.0 404 Not Found");
+    echo "<h1>File not found</h1>";
+    exit();
 }
 
 // automatic compilation / caching of HTML pages
