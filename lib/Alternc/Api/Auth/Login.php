@@ -8,7 +8,11 @@ class Alternc_Api_Auth_Login implements Alternc_Api_Auth_Interface {
 
     private $db; // PDO object
 
-    const ERR_INVALID_ARGUMENT = 1111201;
+    const ERR_INVALID_ARGUMENT = 1111801;
+    const ERR_INVALID_SECRET = 1111802;
+    const ERR_INVALID_LOGIN = 1111803;
+    const ERR_DISABLED_ACCOUNT = 1111804;
+    const ERR_INVALID_AUTH = 1111805;
 
     /**
      * Constructor of the Login Api Auth
@@ -44,15 +48,23 @@ class Alternc_Api_Auth_Login implements Alternc_Api_Auth_Interface {
             throw new \Exception("Invalid login", self::ERR_INVALID_LOGIN);
         }
 
-        $stmt = $db->query("SELECT m.enabled,m.uid,m.login,m.su FROM membres m WHERE m.login=? AND m.password=?;", array($options["login"], $options["password"]), PDO::FETCH_CLASS);
-        $me = $stmt->fetch();
-        if (!$me)
+	$stmt = $this->db->prepare("select * from membres where login= ? ;");
+        $stmt->execute(array($options['login']));
+	if ($stmt->rowCount() == 0) {
+            return new Alternc_Api_Response(array("code" => self::ERR_INVALID_AUTH, "message" => "Invalid login or password"));
+        }
+        $record = $stmt->fetch(PDO::FETCH_OBJ);
+        if (_md5cr($options['password'], $record->pass) != $record->pass) {
+            return new Alternc_Api_Response(array("code" => self::ERR_INVALID_AUTH, "message" => "Invalid login or password"));
+        }
+
+        if (!$record)
             return new Alternc_Api_Response(array("code" => ERR_INVALID_AUTH, "message" => "Invalid login or password"));
-        if (!$me->enabled)
+        if (!$record->enabled)
             return new Alternc_Api_Response(array("code" => ERR_DISABLED_ACCOUNT, "message" => "Account is disabled"));
 
         return Alternc_Api_Token::tokenGenerate(
-                        array("uid" => $me->uid, "isAdmin" => ($me->su != 0)), $this->db
+                        array("uid" => (int) $record->uid, "isAdmin" => ($record->su != 0)), $this->db
         );
     }
 
