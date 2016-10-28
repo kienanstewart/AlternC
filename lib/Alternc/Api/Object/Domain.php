@@ -110,7 +110,9 @@ class Alternc_Api_Object_Domain extends Alternc_Api_Legacyobject {
             $options["noerase"] = false;
             $options["force"] = false;
         }
+        $this->dom->lock();
         $did = $this->dom->add_domain($options["domain"], $options["dns"], $options["noerase"], $options["force"], $options["isslave"], $options["slavedom"]);
+        $this->dom->unlock();
         if (!$did) {
             return $this->alterncLegacyErrorManager();
         } else {
