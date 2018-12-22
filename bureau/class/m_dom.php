@@ -1064,6 +1064,11 @@ class m_dom {
         $r["mail"] = $db->Record["gesmx"];
         $r["zonettl"] = $db->Record["zonettl"];
         $r['noerase'] = $db->Record['noerase'];
+        $r['dnssec'] = $db->Record['dnssec'];
+        $r['ksk_algorithm'] = $db->Record['ksk_algorithm'];
+        $r['ksk_keysize'] = $db->Record['ksk_keysize'];
+        $r['zsk_algorithm'] = $db->Record['zsk_algorithm'];
+        $r['zsk_keysize'] = $db->Record['zsk_keysize'];
         $db->free();
         $db->query("SELECT COUNT(*) AS cnt FROM sub_domaines WHERE compte= ? AND domaine= ?;", array($cuid, $dom));
         $db->next_record();
@@ -1437,12 +1442,14 @@ class m_dom {
      * @param boolean $dns Vaut 1 ou 0 pour héberger ou pas le DNS du domaine
      * @param boolean $gesmx Héberge-t-on le emails du domaines sur ce serveur ?
      * @param boolean $force Faut-il passer les checks DNS ou MX ? (admin only)
+     * @param boolean $dnssec
+     *   Whether or not DnsSec should be enabled for the domain.
      * @return boolean appelle $mail->add_dom ou $ma->del_dom si besoin, en
      *  fonction du champs MX. Retourne FALSE si une erreur s'est produite,
      *  TRUE sinon.
      *
      */
-    function edit_domain($dom, $dns, $gesmx, $force = false, $ttl = 86400) {
+    function edit_domain($dom, $dns, $gesmx, $force = false, $ttl = 86400, $dnssec = FALSE) {
         global $db, $msg, $hooks;
         $msg->log("dom", "edit_domain", $dom . "/" . $dns . "/" . $gesmx);
         // Locked ?
@@ -1486,7 +1493,7 @@ class m_dom {
             $dns = "0";
         }
         // On vérifie que des modifications ont bien eu lieu :)
-        if ($r["dns"] == $dns && $r["mail"] == $gesmx && $r["zonettl"] == $ttl) {
+        if ($r["dns"] == $dns && $r["mail"] == $gesmx && $r["zonettl"] == $ttl && $r['dnssec'] == $dnssec) {
             $msg->raise("INFO", "dom", _("No change has been requested..."));
             return true;
         }
@@ -1504,6 +1511,30 @@ class m_dom {
             }
         }
 
+        $dnssec_action = 'OK';
+        if ($dns == "1") {
+            // Activating or de-activating DnsSec
+            if ($r['dnssec'] != $dnssec) {
+                if ($dnssec == 1) {
+                    $dnssec_action = 'CREATE';
+                    //$r = $this->generate_dnssec_keys($dom);
+                    //$msg->raise('ERROR', 'dom', _('Failed to generate on or more of the zone DnsSec keys. DnsSec has been disabled on this domain. Please contact the administrator.'));
+                    // Disable DnsSec since there were generation errors.
+                    //$dnssec = FALSE;
+                }
+                else {
+                    // @TODO: Should the existing keys and setfiles be removed?
+                    // That might be a headache for folks who make a mistake in
+                    // the interface, necessitating that they go and update DS
+                    // records at their registrar or in parents zones.
+                }
+            }
+        }
+        else if ($dns == "0" && $r['dns'] == 1 ) {
+            // We should de-activate DnsSec for domains where DNS is not managed.
+            $dnssec = 0;
+        }
+
         if ($gesmx && !$r["mail"]) {
             $hooks->invoke("hook_dom_add_mx_domain", array($r["id"]));
         }
@@ -1512,12 +1543,72 @@ class m_dom {
             $hooks->invoke("hook_dom_del_mx_domain", array($r["id"]));
         }
 
-        $db->query("UPDATE domaines SET gesdns= ?, gesmx= ?, zonettl= ? WHERE domaine= ?", array($dns, $gesmx, $ttl, $dom));
+        $db->query("UPDATE domaines SET gesdns= ?, gesmx= ?, zonettl= ?, dnssec= ?, dnssec_action= ? WHERE domaine= ?", array($dns, $gesmx, $ttl, $dnssec, $dnssec_action, $dom));
         $this->set_dns_action($dom, 'UPDATE');
 
         return true;
     }
 
+    /**
+     * Generate DnsSec keys for a domain given the domain's current settings.
+     *
+     * @param $dom
+     *   The domain.
+     *
+     * @returns bool
+     *   TRUE on success, FALSE on failure.
+     */
+    public function generate_dnssec_keys($dom) {
+        global $msg;
+        $key_configuration = $this->get_dnssec_key_generation_parameters($dom);
+        $generation = TRUE;
+        foreach ($key_configuration as $key_type => $key_parameters) {
+            // The path to the key is ignored on success.
+            $rval = system_bind::dnssec_create_key($dom, $key_type,
+                                                   $key_parameters['algorithm'],
+                                                   $key_parameters['keysize']);
+            if ($rval === FALSE) {
+                $generation = FALSE;
+            }
+        }
+        return $generation;
+    }
+
+    /**
+     * Get current DnsSec key generation parameters for a domain.
+     *
+     * @param $dom
+     *   The domain.
+     *
+     * @returns array
+     *   An array indexed by key type (eg. 'ksk'), each containing two keys:
+     *   algorithm and keysize.
+     */
+    public function get_dnssec_key_generation_parameters($dom) {
+        global $db;
+        $db->query('select ksk_algorithm, ksk_keysize, zsk_algorithm, zsk_keysize from domaines where domaine = ?', array($dom));
+        if (!$db->next_record()) {
+            $msg->raise('ALERT', 'dom', 'Unable to get dnssec key parameters for domain ' . $dom);
+            return FALSE;
+        }
+        $domain_key_configuration = array(
+            'ksk' => array(
+                'algorithm' => $db->f('ksk_algorithm'),
+                'keysize' => $db->f('ksk_keysize'),
+            ),
+            'zsk' => array(
+                'algorithm' => $db->f('zsk_algorithm'),
+                'keysize' => $db->f('zsk_keysize'),
+            ),
+        );
+        // Remove any NULL values and merge. It's possible that this creates
+        // configurations that are not allowed (eg. DSA key with a large key
+        // size). There should be checking during the actual creation, but also
+        // when per-domain configuration for KSK/ZSK parameters is saved.
+        $key_configuration = system_bind::default_dnssec_configuration() +
+                           array_filter($domain_key_configuration);
+        return $key_configuration;
+    }
 
     /*  Slave dns ip managment  */
 
@@ -1643,13 +1734,14 @@ class m_dom {
     function get_domain_all_summary() {
         global $db;
         $res = array();
-        $db->query("SELECT domaine, gesdns, gesmx, dns_action, zonettl FROM domaines ORDER BY domaine");
+        $db->query("SELECT domaine, gesdns, gesmx, dns_action, zonettl, dnssec FROM domaines ORDER BY domaine");
         while ($db->next_record()) {
             $res[$db->f("domaine")] = array(
                 "gesdns" => $db->f("gesdns"),
                 "gesmx" => $db->f("gesmx"),
                 "dns_action" => $db->f("dns_action"),
                 "zonettl" => $db->f("zonettl"),
+                "dnssec" => $db->f('dnssec'),
             );
         }
         return $res;

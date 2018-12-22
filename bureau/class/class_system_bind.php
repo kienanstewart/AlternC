@@ -37,12 +37,53 @@ class system_bind {
     var $cache_get_persistent = array();
     var $cache_zone_file = array();
     var $cache_domain_summary = array();
+
+    // @Note: The trailing slash is required on this variable since other code
+    // assumes it is present when generating file paths.
     var $zone_file_directory = '/var/lib/alternc/bind/zones/';
 
+    static public $DNSSEC_KEY_BASEDIR = "/var/lib/alternc/bind/keys";
+    static public $DNSSEC_SETFILE_BASEDIR = "/var/lib/alternc/bind/setfiles";
+    static public $dnssec_key_limits = array(
+        'KSK/ZSK' => array(
+            // RSAMD5 should never be used, though it could be valid for dnssec-keygen.
+            // RSASHA1 should never be used, thought it could be valid.
+            'NSEC3RSASHA1' => array(
+                'min' => 512,
+                'max' => 2048,
+            ),
+            'NSEC3DSA' => array(
+                'min' => 512,
+                'max' => 1024,
+                'other' => '%64', // Exact multiple of 64.
+            ),
+            'RSASHA256' => array(
+                'min' => 512,
+                'max' => 2048,
+            ),
+            'RSASHA512' => array(
+                'min' => 512,
+                'max' => 2048,
+            ),
+            'ECDSAP256SHA256' => array(
+                // Keysize parameter is ignored.
+                'min' => 0,
+                'max' => 10000,
+            ),
+            'ECDSAP384SHA384' => array(
+                // Keysize parameter is ignored.
+                'min' => 0,
+                'max' => 10000,
+            ),
+        ),
+        'TSIG/TKEY' => array(
+            // No supported algorithms presently.
+        ),
+    );
 
     /**
      * Return the part of the conf we got from the database
-     * 
+     *
      * @global m_mysql $db
      * @param string $domain
      * @return array $this->cache_conf_db
@@ -83,10 +124,30 @@ class system_bind {
      * Return full path of the zone configuration file
      * 
      * @param string $domain
+     *
+     * @param boolean $signed
+     *   Whether to return the signed or unsigned zone file path. Ignored
+     *   if force is FALSE.
+     *
+     * @param boolean $force
+     *   If FALSE, the zone file path returned will be in accordance with the
+     *   configuration for the domain in the database. If forced, the domain
+     *   configuratoin will be ignored and the path returned according to the
+     *   signed parameter.
+     *
      * @return string
      */
-    function get_zone_file_uri($domain) {
-        return $this->zone_file_directory.$domain;
+    function get_zone_file_uri($domain, $signed = FALSE, $force = FALSE) {
+        if (!$force) {
+            $d = $this->get_domain_summary($domain);
+            $signed = $d['dnssec'];
+        }
+        if (!$signed) {
+            return $this->zone_file_directory.$domain;
+        }
+        else {
+            return "{$this->zone_file_directory}{$domain}.signed";
+        }
     }
 
 
@@ -285,6 +346,86 @@ class system_bind {
 
     }
 
+    /**
+     * Outputs the include statements for a zone's DnsSec keys if enabled.
+     *
+     * @param string $domain
+     * @returns string
+     *   Include statements for all the keys found or an empty ztring.
+     */
+    function dnssec_entry($domain) {
+        $includes = '';
+        $key_directory = system_bind::$DNSSEC_KEY_BASEDIR . "/{$domain}";
+        $dnssec_enabled = $this->dnssec_is_enabled($domain);
+        if ($dnssec_enabled && is_dir($key_directory)) {
+            foreach (glob("{$key_directory}/K{$domain}*.key") as $f) {
+                if (!is_file($f)) {
+                    continue;
+                }
+                $includes .= "\$INCLUDE {$f}\n";
+            }
+        }
+        return $includes;
+    }
+
+    /**
+     * Checks if dnssec is enabled for a domain.
+     *
+     * @param $domain
+     *   A string for which domain to check.
+     *
+     * @returns boolean
+     *   True/False if DnsSec is enabled for the domain.
+     */
+    function dnssec_is_enabled(String $domain) {
+        $d = $this->get_domain_summary($domain);
+        $enabled = false;
+        if ($d && $d['dnssec']) {
+            $enabled = true;
+        }
+        return $enabled;
+    }
+
+    /**
+     * Signs a zone.
+     */
+    function dnssec_sign_zone(String $domain) {
+        global $msg;
+        if (!$domain) {
+            return;
+        }
+        // Keys should already exist.
+        $key_dir = system_bind::$DNSSEC_KEY_BASEDIR . "/{$domain}";
+        $setfile_dir = system_bind::$DNSSEC_SETFILE_BASEDIR . "/{$domain}";
+        if (!is_dir($setfile_dir)) {
+            mkdir($setfile_dir, '0750', TRUE);
+        }
+
+        $return_code = -1;
+        $output = array();
+        $salt = _salt16hex();
+        if (!$salt) {
+            $salt = '-';
+        }
+
+        // The unsigned_zone_file should be an absolute path to the zone file.
+        // The $INCLUDE statements in the the zone file _MUST_ use absolute
+        // paths, otherwise, the CWD of the dnssec-signzone command must be
+        // changed.
+        $unsigned_zone_file = $this->get_zone_file_uri($domain, FALSE, TRUE);
+
+        // @TODO Should '-Q' and '-R' be used to allow for key roll overs?
+        $command = sprintf('/usr/sbin/dnssec-signzone -u -d %s -K %s -3 %s -A -N INCREMENT -o %s %s',
+                           escapeshellarg($setfile_dir), escapeshellarg($key_dir),
+                           escapeshellarg($salt), escapeshellarg($domain),
+                           escapeshellarg($unsigned_zone_file));
+        $last_line = exec(escapeshellcmd($command), $output, $return_code);
+        $msg->log('system_bind', 'dnssec_sign_zone',
+                  sprintf('Signed zone %s using command "%s". Return code %d; Last line of output: %s',
+                          $domain, $command, $return_code, $last_line)
+        );
+        return $return_code;
+    }
 
     /**
      * 
@@ -351,6 +492,7 @@ class system_bind {
 
         $zone.= $this->dkim_entry($domain);
         $zone.= $this->mail_autoconfig_entry($domain);
+        $zone .= $this->dnssec_entry($domain);
 
         $zone.="\n;;; END ALTERNC AUTOGENERATE CONFIGURATION\n";
         $zone.=$this->get_persistent($domain);
@@ -423,11 +565,16 @@ class system_bind {
         }
  
         // Save file, and apply chmod/chown
-        $file=$this->get_zone_file_uri($domain);
+        // Always want to save the unsigned version.
+        $file=$this->get_zone_file_uri($domain, FALSE, TRUE);
         file_put_contents($file, $this->get_zone($domain));
         chown($file, 'bind');
         chmod($file, 0640);
-
+        $d = $this->get_domain_summary($domain);
+        if ($d['dnssec']) {
+            $this->dnssec_sign_zone($domain);
+        }
+        // @TODO: What should happen if zone signing fails?
         $dom->set_dns_action($domain, 'OK');
         return true; // fixme add tests
     }
@@ -440,9 +587,24 @@ class system_bind {
      * @return boolean
      */
     function delete_zone($domain) {
-        $file=$this->get_zone_file_uri($domain);
-        if (file_exists($file)) {
-            unlink($file);
+        // get_zone_file_uri() is used since it's result won't be cached.
+        $files = array(
+            $this->get_zone_file_uri($domain, FALSE, TRUE),
+            $this->get_zone_file_uri($domain, TRUE, TRUE),
+        );
+        foreach ($files as $file) {
+            if (file_exists($file)) {
+                unlink($file);
+            }
+        }
+        $dnssec_directories = array(
+            system_bind::$DNSSEC_KEY_BASEDIR . "/{$domain}",
+            system_bind::$DNSSEC_SETFILE_BASEDIR . "/{$domain}",
+        );
+        foreach ($dnssec_directories as $dir) {
+            if ($domain && is_dir($dir)) {
+                rmdir($dir);
+            }
         }
         $this->dkim_delete($domain);
         return true;
@@ -521,5 +683,192 @@ class system_bind {
     }
 
 
-} /* Class system_bind */
+    /**
+     * Returns the current default configuration for dnssec.
+     *
+     * @returqns array
+     *   An array with two indexes 'ksk' (keysigning key), 'zsk' (zonesigning key).
+     *   Each key type is also an array with the properities 'algorithm', and 'size'.
+     *   Algorithm should match the named parameters for dnssec-keygen, and size should
+     *   be an integer.
+     */
+    public static function default_dnssec_configuration() {
+        $data = array(
+            'ksk' => array(
+                'algorithm' => variable_get('ksk_algorithm', 'RSASHA512', ''),
+                'keysize'   => variable_get('ksk_keysize', 2048, ''),
+            ),
+            'zsk' => array(
+                'algorithm' => variable_get('zsk_algorithm', 'RSASHA512', ''),
+                'keysize'   => variable_get('zsk_keysize', 2048, ''),
+            ),
+        );
+        return $data;
+    }
 
+    /**
+     * Returns the DS entries for a domain.
+     *
+     * @returns string
+     *   The output of dnssec-dsfromkey.
+     */
+    public static function dnssec_ds_entries($domain) {
+        return shell_exec("/usr/sbin/dnssec-dsfromkey -A -f {$this->zone_file_directory}/{$domain}");
+    }
+
+    /**
+     * Creates new key for a domain.
+     *
+     * @param $domain string
+     *   The domain to create the key for.
+     *
+     * @param $key_type string
+     *   One of 'ksk' or 'zsk' for key-sigining keys or zone-sigining keys.
+     *
+     * @param $algorithm string
+     *   The name of algorithm as recognized by dnssec-genkey.
+     *
+     * @param $length int
+     *   The length of the key in bytes. Note: for elliptic curve keys this
+     *   parameter is ignored.
+     *
+     * @returns string|bool
+     *   Returns the full path to the keyfile created on success, otherwise FALSE
+     *   is returned on a failure.
+     */
+    public static function dnssec_create_key($domain, $key_type, $algorithm, $length) {
+        global $msg;
+        $valid = system_bind::validate_key_parameters($key_type, $algorithm, $length);
+        if (!$valid) {
+            $msg->raise('ERROR', 'system_bind', _("Key generation parameters for {$domain} are invalid. Please check the domain and server default configuration. Type: {$key_type}; Algorithm: {$algorithm}; Key size: {$length}"));
+            return FALSE;
+        }
+        $ksk = '';
+        if ($key_type == 'ksk') {
+            $ksk = ' -f KSK ';
+        }
+        $output = array();
+        $return_code = -1;
+        $key_dir = system_bind::$DNSSEC_KEY_BASEDIR . '/' . $domain;
+        // @TODO: This fails because the keys directory is owned and only readable by root.
+        // @TODO: Furthermore, this should probably be called during update, when the scripts
+        // aren't running as the alterncpanel user.
+        // @TODO: Similar problems probably exist for the set files.
+        if (!is_dir($key_dir)) {
+            if (!mkdir($key_dir, 0750, TRUE)) {
+                $msg->raise('ERROR', 'system_bind', _('Unable to create key storage directory'));
+                $msg->log('system_bind', 'dnssec_create_key', "Unable to create directory '{$key_dir}'");
+                return FALSE;
+            }
+        }
+        $command = sprintf("/usr/sbin/dnssec-keygen -q{$ksk} -a %s -b %s -n ZONE -K %s %s",
+                           escapeshellarg($algorithm), escapeshellarg($length),
+                           escapeshellarg($key_dir), escapeshellarg($domain));
+        $file_name = exec(escapeshellcmd($command), $output, $return_code);
+        $msg->log('system_bind', 'dnssec_create_key',
+                    sprintf('Executed command "%s". Return code %d ; Last line of output: %s',
+                            $command, $return_code, $file_name)
+        );
+        if ($return_code == 0) {
+            return "{$key_dir}/{$file_name}.key";
+        }
+        else {
+            $output = implode("\n", $output);
+            $msg->log('system_bind', 'dnssec_create_key', "Full output: {$output}");
+        }
+        return FALSE;
+    }
+
+    public static function validate_key_parameters($key_type, $algorithm, $length) {
+        global $msg;
+        if (in_array($key_type, array('ksk', 'zsk'))) {
+            if (!in_array($algorithm,array_keys(system_bind::$dnssec_key_limits['KSK/ZSK']))) {
+                // Unsupported algorithm.
+                $msg->debug('system_bind', 'validate_key_parameters',
+                            "Key validation failed: unknown algorithm for ksk/zsk {$algorithm}");
+                return FALSE;
+            }
+            $min = system_bind::$dnssec_key_limits['KSK/ZSK'][$algorithm]['min'];
+            $max = system_bind::$dnssec_key_limits['KSK/ZSK'][$algorithm]['max'];
+            if ($length >=  $min && $length <= $max) {
+                if (isset(system_bind::$dnssec_key_limits['KSK/ZSK'][$algorithm]['other'])) {
+                    // Only have one "other" check for the moment. Could do more
+                    // flexible parsing here.
+                    $other = system_bind::$dnssec_key_limits['KSK/ZSK'][$algorithm]['other'];
+                    if ($other == '%64') {
+                        return $length % 64 == 0;
+                    }
+                    $msg->debug('system_bind', 'validate_key_parameters',
+                                "Key validation failed: unknown other condition '{$other}'");
+                }
+                else {
+                    return TRUE;
+                }
+            }
+            else {
+                $msg->debug('system_bind', 'validate_key_parameters',
+                            "Key validation failed: keysize ({$length} outside of bounds {$min} and {$max}");
+            }
+        }
+        else {
+            $msg->debug('system_bind', 'validate_key_parameters',
+                        "Key validation failed: unknown key type '{$key_type}'");
+        }
+        return FALSE;
+    }
+
+    /**
+     * Lists all the existing keys for a given domain.
+     *
+     * @param $domain
+     *   The domain name
+     *
+     * @returns array
+     *   An array, possibly empty, of all existing keys for the domain.
+     *   The array elements are full paths to the keys.
+     */
+    public static function list_keys($domain) {
+        $r = array();
+        if (!$domain) {
+            return $r;
+        }
+       $key_dir = system_bind::$DNSSEC_KEY_BASEDIR . '/' . $domain;
+       if (!is_dir($key_dir)) {
+           return $r;
+       }
+       $r = glob("{$key_dir}/K{$domain}*.key");
+       return $r;
+    }
+
+    /**
+     * Gets the timing metadata for a given key.
+     *
+     * @param $key_file
+     *   Full path to the key file.
+     *
+     * @returns array
+     *   An array the metadata properties indexed by name: Created, Publish
+     *   Activate, Revoke, Inactive, Delete with the data being NULL (for unset)
+     *   or a time in seconds since the UNIX epoch.
+     */
+    public static function get_key_metadata($key_file) {
+        global $msg;
+        $data = array();
+        if (!is_file($key_file)) {
+            return $data;
+        }
+        $output = shell_exec(escapeshellcmd("LANG=C /usr/sbin/dnssec-settime -u -p all {$key_file}"));
+        $lines = explode(PHP_EOL, $output);
+        foreach ($lines as $line) {
+            $r = explode(": ", $line);
+            if ($r && length($r) == 2) {
+                $data[$r[0]] = $r[1];
+            }
+            else {
+                $msg->log('system_bind', 'get_key_metadata', "Warning: output line for dnssec-settime for key {$key_file} does not have expected form: \"{$line}\"");
+            }
+        }
+        return $data;
+    }
+
+} /* Class system_bind */

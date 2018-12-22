@@ -1213,24 +1213,56 @@ function csrf_check($token=null) {
 function _sha512cr($password, $salt = NULL) {
     if (!$salt) {
         // Aim to have a 16 character salt for SHA-512 crypt.
-        // @see https://secure.php.net/manual/en/function.crypt.php
-        if (function_exists('random_bytes')) {
-            // PHP >= 7.0
-            $salt = base64_encode(random_bytes(12));
-        }
-        else if (function_exists('mcrypt_create_iv')) {
-            $salt = base64_encode(mcrypt_create_iv(12, MCRYPT_DEV_URANDOM));
-        }
-        else if (function_exists('openssl_random_pseudo_bytes')) {
-            $salt  = base64_encode(openssl_random_pseudo_bytes(12));
-        }
-        if (!$salt) {
-            throw Exception('Unable to generate salt');
-        }
+        $salt = _salt16();
     }
     $salt = '$6$rounds=20000$' . $salt;
     $hash = crypt($password, $salt);
     return $hash;
+}
+
+/**
+ * Generate a 16 character base64 encoded salt.
+ *
+ * @returns string
+ */
+function _salt16() {
+    $salt = '';
+    // @see https://secure.php.net/manual/en/function.crypt.php
+    if (function_exists('random_bytes')) {
+        // PHP >= 7.0
+        $salt = base64_encode(random_bytes(12));
+        }
+    else if (function_exists('mcrypt_create_iv')) {
+        $salt = base64_encode(mcrypt_create_iv(12, MCRYPT_DEV_URANDOM));
+    }
+    else if (function_exists('openssl_random_pseudo_bytes')) {
+        $salt  = base64_encode(openssl_random_pseudo_bytes(12));
+    }
+    if (!$salt) {
+        throw Exception('Unable to generate salt');
+    }
+    return $salt;
+}
+
+/**
+ * Generate a 16 character hex ewncoded salt.
+ */
+function _salt16hex() {
+    $salt = '';
+    if (function_exists('random_bytes')) {
+        // PHP >= 7.0
+        $salt = random_bytes(8);
+        }
+    else if (function_exists('mcrypt_create_iv')) {
+        $salt = mcrypt_create_iv(8, MCRYPT_DEV_URANDOM);
+    }
+    else if (function_exists('openssl_random_pseudo_bytes')) {
+        $salt  = openssl_random_pseudo_bytes(8);
+    }
+    if (!$salt) {
+        throw Exception('Unable to generate salt');
+    }
+    return bin2hex($salt);
 }
 
 /**

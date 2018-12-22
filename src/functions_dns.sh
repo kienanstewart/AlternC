@@ -50,18 +50,54 @@ dns_get_zonettl() {
     echo $zonettl
 }
 
+dns_sec_salt() {
+    openssl rand -hex 8 | tr -d "\n"
+}
+
+dns_sec_is_enabled() {
+    local domain="$1"
+    $MYSQL_DO "select dnssec FROM domaines where domaine='$domain';"
+}
+
+dns_sec_needs_keys() {
+    local domain="$1"
+    local r=$($MYSQL_DO "select dnssec_action FROM domaines where domaine='$domain';")
+    if [[ $r == "CREATE" ]]; then
+        echo "1"
+    else
+        echo "0"
+    fi
+}
+
+dns_sec_generate_keys() {
+    local domain="$1"
+    /usr/lib/alternc/generate_dnssec_keys.php "$domain"
+    r=$?
+    $MYSQL_DO "update domaines set dnssec_action = 'OK' where domaine='$domain';"
+    return $r
+}
+
 dns_chmod() {
     local domain=$1
-    chgrp bind $(dns_zone_file $domain)
-    chmod 640 $(dns_zone_file $domain)
+    zone_file=$(dns_zone_file $domain)
+    chgrp bind $zone_file
+    chmod 640 $zone_file
+    if [ $(dns_sec_is_enabled $domain) -eq "1" ] ; then
+        chgrp bind "${zone_file}.signed"
+        chmod 640 "${zone_file}.signed"
+    fi
     return 0
 }
 
 dns_named_conf() {
   local domain=$1
 
-  if [ ! -f "$(dns_zone_file $domain)" ] ; then
-    echo Error : no file $(dns_zone_file $domain)
+  zone_file=$(dns_zone_file $domain)
+  if [ $(dns_sec_is_enabled $domain) -eq "1" ] ; then
+      zone_file="${zone_file}.signed"
+  fi
+  if [ ! -f "$zonefile" ] ; then
+    echo Error : no file "$zone_file"
     return 1
   fi
 
@@ -70,7 +106,7 @@ dns_named_conf() {
   if [ $? -ne 0 ] ; then
     local tempo=$(cat "$NAMED_TEMPLATE")
     tempo=${tempo/@@DOMAINE@@/$domain}
-    tempo=${tempo/@@ZONE_FILE@@/$(dns_zone_file $domain)}
+    tempo=${tempo/@@ZONE_FILE@@/$zone_file}
     echo $tempo >> "$NAMED_CONF"
     # Kindly ask Bind to reload its configuration
     # (the zone file is already created and populated)
@@ -86,7 +122,13 @@ dns_delete() {
 
   # Delete the zone file
   if [ -w "$(dns_zone_file $domain)" ] ; then
-    rm -f "$(dns_zone_file $domain)"
+      rm -f "$(dns_zone_file $domain)"
+      rm -f "$(dns_zone_file $domain).signed"
+  fi
+  # Delete the zones keys, if they exist.
+  if [[ ! -z "$domain" && -d "/var/lib/alternc/bind/keys/$domain" ]] ; then
+      rm -rf "/var/lib/alternc/bind/keys/$domain"
+      rm -rf "/var/lib/alternc/bind/setfiles/$domain"
   fi
 
   local reg_domain=${domain/./\\.}
@@ -112,7 +154,7 @@ dns_regenerate() {
     local domain=$1
     local manual_tag=";;; END ALTERNC AUTOGENERATE CONFIGURATION"
     local zone_file=$(dns_zone_file $domain)
-
+    local dnssec=$(dns_sec_is_enabled $domain)
     # Check if locked
     dns_is_locked "$domain"
     if [ $? -eq 0 ]; then
@@ -175,6 +217,21 @@ dns_regenerate() {
     fi
     ##### OpenDKIM signature management - END
 
+    # Generate key files if needed.
+    dnssec_create_keys=$(dns_sec_needs_keys $domain)
+    if [[ "$dnssec_create_keys" -eq "1" ]] ; then
+        if ! dns_sec_generate_keys $domain; then
+            dnssec="0"
+            $MYSQL_DO "update domaines set dnssec = 0 where domaine='$domain';"
+        fi
+    fi
+    # Include key files for the zones if DnsSec is enabled for the zone.
+    if [[ "$dnssec" -eq "1" ]] ; then
+        for i in /var/lib/alternc/bind/keys/"$domain"/K"$domain"*.key ; do
+            file="$( echo -e "$file" ; echo "\$INCLUDE $i")"
+        done
+    fi
+
     # Replace the vars by their values
     # Here we can add dynamic value for the default MX
     file=$( echo -e "$file" | sed -e "
@@ -217,6 +274,13 @@ dns_regenerate() {
 
     # Hook it !
     run-parts --arg=dns_reload_zone --arg="$domain" /usr/lib/alternc/reload.d
+
+    # Sign it if DnsSec is enabled for the domain.
+    if [[ "$dnssec" -eq "1" ]]  ; then
+        key_dir="/var/lib/alternc/bind/keys/$domain"
+        set_dir="/var/lib/alternc/bind/setfiles/$domain"
+        dnssec-signzone -u -3 "$(dns_sec_salt)" -d "$set_dir" -K "$key_dir" -A -N INCREMENT -o "$domain" "$zone_file"
+    fi
 
     # ask bind to reload the zone
     $RNDC reload $domain

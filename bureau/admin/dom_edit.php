@@ -105,7 +105,6 @@ if ($r['dns_action']=='UPDATE') {?>
   include_once("foot.php");
   die();
 }
-
 if (! empty($r['dns_result']) && $r['dns_result'] != '0') {
   if ($r['dns_result'] == 1) $r['dns_result'] =_("DNS zone is locked, changes will be ignored");
   echo '<p class="alert alert-warning">'; __($r['dns_result']); echo '</p>';
@@ -123,6 +122,9 @@ if (! empty($r['dns_result']) && $r['dns_result'] != '0') {
 <?php if ( $r["dns"] ) { ?>
   <li class="view"><a href="#tabsdom-view" onClick="update_dns_content();"><?php __("View");?></a></li> 
 <?php } //if gesdns ?>
+  <?php if ($r['dnssec']): ?>
+    <li class="dnssec"><a href="#tabsdom-dnssec"><?php __('DnsSec');?></a></li>
+  <?php endif; ?>
   <li class="delete"><a href="#tabsdom-delete"><?php __("Delete");?></a></li>
 </ul>
 
@@ -322,6 +324,27 @@ if (!$r['noerase']) {
 </tr>
 </table>
 <p class="alert alert-warning">    <?php __("Warning: If you set this to 'no', all your email accounts and aliases on this domain will be immediately deleted."); ?></p>
+<div class="dnssec-configuration">
+    <span><?php __("Enable DnsSec for this domain?"); ?></span>
+    <span><input type="checkbox" name="dnssec" value="1" <?php if($r['dnssec']) { echo "checked"; } ?>/></span>
+    <div>
+        <p class="alert alert-warning"><?php __("If configuring DnsSec for the first time, ensure that your registrar can configure DS records for your domain. If enabling DnsSec on a subdomain, DS records will need to be added to the parent domain instead.");?>
+            <br><br>
+<?php __("If disabling DnsSec make sure to remove DS records recorded with your registrar or in the parent domain.");?>
+            <br><br>
+            <?php __("Initial KSK/ZSK configuration is determined by the AlternC settings. Once enabled, keys may be managed in the \"DnsSec\" tab");?>
+            <br><br>
+            <?php $dnssec_defaults = system_bind::default_dnssec_configuration(); ?>
+            <?php __("Key-siging keys will be {$dnssec_defaults['ksk']['algorithm']} of length {$dnssec_defaults['ksk']['keysize']}. Zone-signing keys will be {$dnssec_defaults['zsk']['algorithm']} of length {$dnssec_defaults['zsk']['keysize']}."); ?>
+        </p>
+    </div>
+</div>
+<?php if ($admin->enabled || intval($oldid)): ?>
+    <div class="ignore-dns-checks">
+        <span><?php __('Ignore whois check?'); ?></span>
+        <span><input type="checkbox" name="force" value="1"/></span>
+    </div>
+<?php endif; ?>
 <input type="submit" class="inb ok" name="submit" value="<?php __("Submit the changes"); ?>" />
 	</form>
 
@@ -350,6 +373,111 @@ if (!$r['noerase']) {
 
 </div>
 <?php } // if dns ?>
+
+<?php if ($r['dnssec']): ?>
+    <div id="tabsdom-dnssec">
+        <div>
+            <h3><?php __('DS Entries'); ?></h3>
+            <p><?php __('Here are the current DS entries for your zone. To finish activating DNSSEC on your domain, they must be uploaded to your registrar, or added as DS entries on the parent zone file.');?></p>
+            <pre><?php echo system_bind::dnssec_ds_entries(); ?></pre>
+        </div>
+        <div>
+            <h3><?php __('Existing DnsSec Keys'); ?></h3>
+            <form action="dom_editdnsseckeys.php" id="fdnsseckeys" name="fdsnsseckeys" method="post">
+                <!-- First pass: don't enforce workflow, just give options -->
+                <input type="hidden" name="domain" value="<?php echo urlencode($r['name']); ?>"/>
+                <?php $keys = system_bind::list_keys($r['name']); ?>
+                <?php if (!empty($keys)): ?>
+                    <table>
+                        <?php $attr_list = array('Created', 'Publish', 'Activate',
+                        'Revoke', 'Inactive', 'Delete'); ?>
+                        <tr>
+                            <th><?php __('Key'); ?></th>
+                            <?php foreach ($attr_list as $attr): ?>
+                                <th><?php __($attr); ?></th>
+                            <?php endforeach; ?>
+                        </tr>
+                        <?php foreach ($keys as $key): ?>
+                            <?php $key_data = system_bind::get_key_metadata($key); ?>
+                            <?php $key_base = basename($key); ?>
+                            <td><?php print($key_base); ?></td>
+                            <?php foreach ($attr_list as $attr): ?>
+                                <td>
+                                    <!-- @TODO: Is there a nice datetime edit element? -->
+                                    <input type="datetime-local"
+                                           name="key[<?php echo $key_base; ?>][<?php echo $attr; ?>]"
+                                           value="<?php echo strftime("%Y-%m-%dT%H:%M", $key_data[$attr]); ?>"
+                                    />
+                                </td>
+                            <?php endforeach; ?>
+                        <?php endforeach; ?>
+                    </table>
+                    <button type="submit" class="inb" value="<?php __('Submit'); ?>"/>
+                <?php else: ?>
+                    <p><?php __('No keys found for the domain'); ?></p>
+                <?php endif; ?>
+            </form>
+        </div>
+        <div>
+            <h3><?php __('Key generation settings for your domain'); ?></h3>
+            <?php $key_conf = $dom->get_dnssec_key_generation_parametrs; $valid_conf = system_bind::$dns_key_limits; ?>
+            <form action="dom_editdnssec.php" method="post" id="fdnssec" name="fdnssec">
+                <?php csrf_get(); ?>
+                <input type="hidden" name="domain" value="<?php echo urlencode($r['name']); ?>"/>
+                <?php $keys = array(
+                    'ksk' => array(
+                        'title' => _('Key-Signing Key Paramaters'),
+                        'validation_type' => 'KSK/ZSK'),
+                    'zsk' => array(
+                        'title' => _('Zone-Signing Key Parameters'),
+                        'validation_type' => 'KSK/ZSK')
+                ); ?>
+                <?php foreach ($keys as $key_type => $attrs): ?>
+                    <h4><?php echo $attrs['key_title']; ?></h4>
+                    <label>
+                        <?php __('Algorithm'); ?>
+                        <select name="<?php echo $key_type; ?>_algorithm">
+                            <?php foreach($valid_conf[$attrs['validation_type']] as $algo => $v): ?>
+                                <?php $selected = ($algo == $key_config[$key_type]['algorithm']); ?>
+                                <option
+                                    value="<?php echo $algo; ?>"
+                                    <?php echo $selected ? "selected" : "";?>
+                                >
+                                    <?php echo $algo; ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                    <label>
+                        <?php __('Key Size'); ?>
+                        <select name=<?php echo $key_type; ?>_keysize">
+                            <?php // @TODO Change key sizes available when algorithm selected changes ?>
+                            <?php foreach(array(512, 1024, 2048) as $keysize): ?>
+                                <?php $selected = ($keysize == $key_config[$key_type]['keysize']); ?>
+                                <option
+                                    value="<?php echo $keysize; ?>"
+                                    <?php echo $selected ? "selected" : ""; ?>
+                                >
+                                    <?php echo $keysize; ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                <?php endforeach; ?>
+                <label><?php __('Force key re-generation'); ?>
+                    <input type="checkbox" name="regen-keys">
+                </label>
+                <p class="alert alert-warning">
+                    <?php __('When creating new keys you must manually managed key-rollover.'); ?>
+                    <?php __('All keys are added to the zone.'); ?>
+                </p>
+                <button type="submit" class="inb" value="<?php __('Submit'); ?>"/>
+                <!-- @TODO: Implement form submission handling for KSK/ZSK algo change + key regen -->
+            </form>
+        </div>
+    </div>
+<?php endif; ?>
+
     <?php
 if (!$r['noerase']) {
 ?>

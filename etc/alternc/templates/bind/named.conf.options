@@ -20,6 +20,15 @@ options {
         allow-query     { "internal"; };
         allow-transfer  { "allslaves"; };
 	recursion no;
+
+    # DnsSec configuration. This is close to defaults for bind9.
+    # To fully enable certain types of validation, managed-keys or trusted-keys
+    # should be added.
+    dnssec-enable yes;
+    dnssec-validation yes;
+    # Look-aside servers are no longer operational.
+    # Alternatively specific domains could be configured here.
+    dnssec-lookaside no;
 };
 
 acl "internal" {

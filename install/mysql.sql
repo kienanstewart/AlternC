@@ -116,6 +116,12 @@ CREATE TABLE IF NOT EXISTS domaines (
   dns_action enum ('OK','UPDATE','DELETE') NOT NULL default 'UPDATE',
   dns_result varchar(255) not null default '',
   zonettl int(10) unsigned NOT NULL default '86400',
+  dnssec  BOOLEAN NOT NULL DEFAULT FALSE,
+  dnssec_action ENUM ('OK', 'CREATE') NOT NULL DEFAULT 'OK',
+  ksk_algorithm ENUM ('NSEC3RSASHA1', 'NSEC3DSA', 'RSASHA256', 'RSASHA512', 'ECDSAP256SHA256', 'ECDSAP384SHA384') DEFAULT NULL,
+  ksk_keysize INT DEFAULT NULL,
+  zsk_algorithm ENUM ('NSEC3RSASHA1', 'NSEC3DSA', 'RSASHA256', 'RSASHA512', 'ECDSAP256SHA256', 'ECDSAP384SHA384') DEFAULT NULL,
+  zsk_keysize INT DEFAULT NULL,
   PRIMARY KEY (id),
   UNIQUE KEY (domaine)
 ) ENGINE=InnoDB;
