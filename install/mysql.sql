@@ -115,7 +115,7 @@ CREATE TABLE IF NOT EXISTS domaines (
   noerase tinyint(4) NOT NULL default '0',
   dns_action enum ('OK','UPDATE','DELETE') NOT NULL default 'UPDATE',
   dns_result varchar(255) not null default '',
-  zonettl int(10) unsigned NOT NULL default '86400',
+  zonettl int(10) unsigned NOT NULL default '3600',
   dnssec  BOOLEAN NOT NULL DEFAULT FALSE,
   dnssec_action ENUM ('OK', 'CREATE') NOT NULL DEFAULT 'OK',
   ksk_algorithm ENUM ('NSEC3RSASHA1', 'NSEC3DSA', 'RSASHA256', 'RSASHA512', 'ECDSAP256SHA256', 'ECDSAP384SHA384') DEFAULT NULL,
@@ -485,18 +485,20 @@ CREATE TABLE IF NOT EXISTS `domaines_type` (
     PRIMARY KEY ( `name` )
 ) ENGINE=InnoDB COMMENT = 'Type of domains allowed';
 
-INSERT IGNORE INTO `domaines_type` (name, description, target, entry,                             compatibility,                               only_dns, need_dns, advanced, enable) values
-('vhost',  'Locally hosted',             'DIRECTORY', '%SUB% IN A @@PUBLIC_IP@@',                 'txt,defmx,defmx2,mx,mx2',                   false,    false,    false, 'ALL'),
-('url',    'URL redirection',            'URL',       '%SUB% IN A @@PUBLIC_IP@@',                 'txt,defmx,defmx2',                          false,    false,    false, 'ALL'),
-('ip',     'IPv4 redirect',              'IP',        '%SUB% IN A %TARGET%',                      'url,ip,ipv6,txt,mx,mx2,defmx,defmx2',       true,     true,     false, 'ALL'),
-('ipv6',   'IPv6 redirect',              'IPV6',      '%SUB% IN AAAA %TARGET%',                   'ip,ipv6,txt,mx,mx2,defmx,defmx2',           true,     true,     true,  'ALL'),
-('cname',  'CNAME DNS entry',            'DOMAIN',    '%SUB% CNAME %TARGET%',                     '',                                          true,     true,     true,  'ALL'),
-('txt',    'TXT DNS entry',              'TXT',       '%SUB% IN TXT "%TARGET%"',                  'vhost,url,ip,ipv6,txt,mx,mx2,defmx,defmx2', true,     true,     true,  'ALL'),
-('mx',     'MX DNS entry',               'DOMAIN',    '%SUB% IN MX 5 %TARGET%',                   'vhost,url,ip,ipv6,txt,mx,mx2',              true,     true,     true,  'ALL'),
-('mx2',    'secondary MX DNS entry',     'DOMAIN',    '%SUB% IN MX 10 %TARGET%',                  'vhost,url,ip,ipv6,txt,mx,mx2',              true,     true,     true,  'ALL'),
-('defmx',  'Default mail server',        'NONE',      '%SUB% IN MX 5 @@DEFAULT_MX@@.',            'vhost,url,ip,ipv6,txt,defmx2',              true,     true,     true,  'ADMIN'),
-('defmx2', 'Default backup mail server', 'NONE',      '%SUB% IN MX 10 @@DEFAULT_SECONDARY_MX@@.', 'vhost,url,ip,ipv6,txt,defmx',               true,     true,     true,  'ADMIN'),
-('panel',  'AlternC panel access',       'NONE',      '%SUB% IN A @@PUBLIC_IP@@',                 'vhost,url,ip,ipv6,txt,mx,mx2,defmx,defmx2', false,    false,    true,  'ALL')
+INSERT IGNORE INTO `domaines_type` (name, description, target, entry, compatibility, only_dns, need_dns, advanced, enable,has_https_option) VALUES
+('dkim',  'DKIM Key',             'TXT', '%SUB% IN TXT "%TARGET%"',                 'txt,defmx,defmx2,mx,mx2,url,ip,ipv6',                   true,    true,    true, 'ADMIN', false),
+('autodiscover',  'Email autoconfiguration', 'NONE', '%SUB% IN A @@PUBLIC_IP@@', 'txt,defmx,defmx2,mx,mx2', false, true, true, 'ADMIN', false),
+ ('vhost',  'Locally hosted',             'DIRECTORY', '%SUB% IN A @@PUBLIC_IP@@',                 'txt,defmx,defmx2,mx,mx2',                   false,    false,    false, 'ALL', true),
+('url',    'URL redirection',            'URL',       '%SUB% IN A @@PUBLIC_IP@@',                 'txt,defmx,defmx2',                          false,    false,    false, 'ALL', false),
+('ip',     'IPv4 redirect',              'IP',        '%SUB% IN A %TARGET%',                      'url,ip,ipv6,txt,mx,mx2,defmx,defmx2',       true,     true,     false, 'ALL', false),
+('ipv6',   'IPv6 redirect',              'IPV6',      '%SUB% IN AAAA %TARGET%',                   'ip,ipv6,txt,mx,mx2,defmx,defmx2',           true,     true,     true,  'ALL', false),
+('cname',  'CNAME DNS entry',            'DOMAIN',    '%SUB% CNAME %TARGET%',                     '',                                          true,     true,     true,  'ALL', false),
+('txt',    'TXT DNS entry',              'TXT',       '%SUB% IN TXT "%TARGET%"',                  'vhost,url,ip,ipv6,txt,mx,mx2,defmx,defmx2', true,     true,     true,  'ALL', false),
+('mx',     'MX DNS entry',               'DOMAIN',    '%SUB% IN MX 5 %TARGET%',                   'vhost,url,ip,ipv6,txt,mx,mx2',              true,     true,     true,  'ALL', false),
+('mx2',    'secondary MX DNS entry',     'DOMAIN',    '%SUB% IN MX 10 %TARGET%',                  'vhost,url,ip,ipv6,txt,mx,mx2',              true,     true,     true,  'ALL', false),
+('defmx',  'Default mail server',        'NONE',      '%SUB% IN MX 5 @@DEFAULT_MX@@.',            'vhost,url,ip,ipv6,txt,defmx2',              true,     true,     true,  'ADMIN', false),
+('defmx2', 'Default backup mail server', 'NONE',      '%SUB% IN MX 10 @@DEFAULT_SECONDARY_MX@@.', 'vhost,url,ip,ipv6,txt,defmx',               true,     true,     true,  'ADMIN', false),
+('panel',  'AlternC panel access',       'NONE',      '%SUB% IN A @@PUBLIC_IP@@',                 'vhost,url,ip,ipv6,txt,mx,mx2,defmx,defmx2', false,    false,    true,  'ALL', false)
 ;
 UPDATE domaines_type SET create_tmpdir=true, create_targetdir=true WHERE target='DIRECTORY';
 
@@ -799,7 +801,6 @@ CREATE TABLE IF NOT EXISTS `certificates` (
 
 
 
--- make it re-exec-proof
-DELETE FROM alternc_status WHERE name='alternc_version';
-INSERT INTO alternc_status SET name='alternc_version',value='3.5.0.1.sql';
+-- make it re-exec-proof -- BUT don't overwrite existing value !
+INSERT IGNORE INTO alternc_status SET name='alternc_version',value='3.5.0.2.php';
 
